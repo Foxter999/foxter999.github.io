@@ -1,0 +1,755 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c00"
+      },
+      "source": [
+        "# Zadanie 1: dostęp do LLM i mini-wyszukiwarka\n",
+        "\n",
+        "[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/adrianstando/2026Z-PJATK-TEG/blob/main/01-llm-embeddingi/zadanie.ipynb)\n",
+        "\n",
+        "**Oddanie:** mail z tematem `[TEG] lab-01`, w załączniku ten notebook **z wynikami komórek**, bez kluczy API.\n",
+        "\n",
+        "**Termin:** przed zajęciami 2.\n",
+        "\n",
+        "Części:\n",
+        "1. Dostęp do modelu i wywołanie z wymuszonym formatem odpowiedzi.\n",
+        "2. Koszt w tokenach: polski i angielski.\n",
+        "3. Wyszukiwarka na własnych dokumentach i analiza błędu."
+      ],
+      "id": "c00"
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c01"
+      },
+      "source": [
+        "## 0. Konfiguracja"
+      ],
+      "id": "c01"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "c02",
+        "outputId": "e43327d8-e3db-4162-95da-3aa127e88316",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "execution_count": 1,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "\u001b[?25l   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m0.0/2.0 MB\u001b[0m \u001b[31m?\u001b[0m eta \u001b[36m-:--:--\u001b[0m\r\u001b[2K   \u001b[91m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[90m╺\u001b[0m\u001b[90m━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m1.0/2.0 MB\u001b[0m \u001b[31m29.6 MB/s\u001b[0m eta \u001b[36m0:00:01\u001b[0m\r\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m2.0/2.0 MB\u001b[0m \u001b[31m30.8 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\n",
+            "\u001b[?25h"
+          ]
+        }
+      ],
+      "source": [
+        "%pip install -q openai tiktoken numpy scikit-learn matplotlib seaborn python-dotenv anthropic"
+      ],
+      "id": "c02"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import openai\n",
+        "import tiktoken\n",
+        "import numpy as np\n",
+        "import sklearn\n",
+        "import matplotlib\n",
+        "import seaborn\n",
+        "import dotenv\n",
+        "import anthropic\n",
+        "\n",
+        "print(\"Wszystkie biblioteki działają poprawnie!\")"
+      ],
+      "metadata": {
+        "id": "a5z9NlImqp2R",
+        "outputId": "263e190a-917e-4474-d5be-54311499d453",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "id": "a5z9NlImqp2R",
+      "execution_count": 2,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Wszystkie biblioteki działają poprawnie!\n"
+          ]
+        }
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c03"
+      },
+      "source": [
+        "Dostawcę wybiera się zmienną `LLM_PROVIDER` (plik `.env` albo w Colabie: ikona klucza → *Secrets*). Instrukcja konfiguracji dostępu: [00-dostep-do-llm](../00-dostep-do-llm/README.md).\n",
+        "\n",
+        "| `LLM_PROVIDER` | Wymagania |\n",
+        "|---|---|\n",
+        "| `azure` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, deploymenty `gpt-4o-mini` i `text-embedding-3-small` |\n",
+        "| `openai` | `OPENAI_API_KEY` |\n",
+        "| `deepseek` | `DEEPSEEK_API_KEY`; tanie API, bez embeddingów |\n",
+        "| `ollama` | [Ollama](https://ollama.com) lokalnie albo w Colabie na darmowym GPU (komórka niżej), modele `gemma4:e4b`, `gemma3:1b`, `embeddinggemma` |\n",
+        "| `proxy` | uruchomione [proxy dla subskrypcji](../tools/teg-proxy/README.md) (Copilot, Claude, Codex); bez embeddingów |\n",
+        "\n",
+        "Wszyscy dostawcy udostępniają API zgodne z OpenAI, więc dalszy kod jest wspólny. Gdy dostawca nie liczy embeddingów, służy do tego `EMBED_PROVIDER` (domyślnie `ollama`)."
+      ],
+      "id": "c03"
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "wNWZIRoloV6j"
+      },
+      "source": [
+        "### Ollama w Colabie (darmowe GPU)\n",
+        "\n",
+        "Colab daje za darmo kartę graficzną NVIDIA T4, na której działa Ollama. Najpierw *Środowisko wykonawcze → Zmień typ środowiska wykonawczego → T4 GPU*, potem komórka poniżej (odkomentowana). Na początek wystarczy mały `gemma3:1b`; większy `gemma4:e4b` zajmuje ok. 10 GB. Bez niego w *Secrets* ustawia się `OLLAMA_CHAT=gemma3:1b`."
+      ],
+      "id": "wNWZIRoloV6j"
+    },
+    {
+      "cell_type": "code",
+      "execution_count": 1,
+      "metadata": {
+        "id": "rvAjlaWqoV6k",
+        "outputId": "f74d1430-9b9b-403c-8279-a54587765c0c",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Tue Oct 13 15:22:34 2026       \n",
+            "+-----------------------------------------------------------------------------------------+\n",
+            "| NVIDIA-SMI 580.82.07              Driver Version: 580.82.07      CUDA Version: 13.0     |\n",
+            "+-----------------------------------------+------------------------+----------------------+\n",
+            "| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n",
+            "| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n",
+            "|                                         |                        |               MIG M. |\n",
+            "|=========================================+========================+======================|\n",
+            "|   0  Tesla T4                       Off |   00000000:00:04.0 Off |                    0 |\n",
+            "| N/A   61C    P8             10W /   70W |       0MiB /  15360MiB |      0%      Default |\n",
+            "|                                         |                        |                  N/A |\n",
+            "+-----------------------------------------+------------------------+----------------------+\n",
+            "\n",
+            "+-----------------------------------------------------------------------------------------+\n",
+            "| Processes:                                                                              |\n",
+            "|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n",
+            "|        ID   ID                                                               Usage      |\n",
+            "|=========================================================================================|\n",
+            "|  No running processes found                                                             |\n",
+            "+-----------------------------------------------------------------------------------------+\n",
+            "debconf: unable to initialize frontend: Dialog\n",
+            "debconf: (No usable dialog-like program is installed, so the dialog based frontend cannot be used. at /usr/share/perl5/Debconf/FrontEnd/Dialog.pm line 79, <STDIN> line 4.)\n",
+            "debconf: falling back to frontend: Readline\n",
+            "debconf: unable to initialize frontend: Readline\n",
+            "debconf: (This frontend requires a controlling tty.)\n",
+            "debconf: falling back to frontend: Teletype\n",
+            "dpkg-preconfigure: unable to re-open stdin: \n",
+            ">>> Installing ollama to /usr/local\n",
+            ">>> Downloading ollama-linux-amd64.tar.zst\n",
+            "######################################################################## 100.0%\n",
+            ">>> Creating ollama user...\n",
+            ">>> Adding ollama user to video group...\n",
+            ">>> Adding current user to ollama group...\n",
+            ">>> Creating ollama systemd service...\n",
+            "\u001b[1m\u001b[31mWARNING:\u001b[m systemd is not running\n",
+            ">>> NVIDIA GPU installed.\n",
+            ">>> The Ollama API is now available at 127.0.0.1:11434.\n",
+            ">>> Install complete. Run \"ollama\" from the command line.\n",
+            "\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\n",
+            "\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[A\u001b[A\u001b[A\u001b[1G\u001b[?25h\u001b[?2026l\n"
+          ]
+        }
+      ],
+      "source": [
+        "!nvidia-smi\n",
+        "!sudo apt-get -qq install -y zstd pciutils > /dev/null\n",
+        "!curl -fsSL https://ollama.com/install.sh | sh\n",
+        "\n",
+        "import subprocess\n",
+        "import time\n",
+        "\n",
+        "subprocess.Popen(\n",
+        "    [\"ollama\", \"serve\"],\n",
+        "    stdout=subprocess.DEVNULL,\n",
+        "    stderr=subprocess.DEVNULL\n",
+        ")\n",
+        "\n",
+        "time.sleep(5)\n",
+        "\n",
+        "!ollama pull gemma3:1b\n",
+        "!ollama pull embeddinggemma"
+      ],
+      "id": "rvAjlaWqoV6k"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import os\n",
+        "\n",
+        "os.environ[\"LLM_PROVIDER\"] = \"ollama\"\n",
+        "os.environ[\"EMBED_PROVIDER\"] = \"ollama\"\n",
+        "os.environ[\"OLLAMA_CHAT\"] = \"gemma3:1b\"\n",
+        "\n",
+        "print(\"Wybrany dostawca: Ollama\")"
+      ],
+      "metadata": {
+        "id": "0aWKkQVt3XlE",
+        "outputId": "261b677c-a3a7-4d96-c1f6-77cb8460e7e9",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "id": "0aWKkQVt3XlE",
+      "execution_count": 2,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Wybrany dostawca: Ollama\n"
+          ]
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "c04",
+        "outputId": "cf6d88fd-b3f0-4271-a775-6ce501871dbc",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "execution_count": 3,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "czat: ollama (gemma3:1b, klasyczny: gemma3:1b) | embeddingi: ollama (embeddinggemma)\n"
+          ]
+        }
+      ],
+      "source": [
+        "import os\n",
+        "\n",
+        "try:  # Colab: sekrety z panelu \"Secrets\"\n",
+        "    from google.colab import userdata\n",
+        "    for k in [\"LLM_PROVIDER\", \"EMBED_PROVIDER\", \"OLLAMA_CHAT\", \"OPENAI_API_KEY\", \"AZURE_OPENAI_ENDPOINT\",\n",
+        "              \"AZURE_OPENAI_API_KEY\", \"DEEPSEEK_API_KEY\", \"ANTHROPIC_API_KEY\"]:\n",
+        "        try:\n",
+        "            os.environ.setdefault(k, userdata.get(k))\n",
+        "        except Exception:\n",
+        "            pass\n",
+        "except ImportError:  # lokalnie: plik .env\n",
+        "    from dotenv import load_dotenv\n",
+        "    load_dotenv(override=True)\n",
+        "\n",
+        "from openai import OpenAI, AzureOpenAI\n",
+        "\n",
+        "# chat: model rozumujący, classic: model bez rozumowania, embed: model embeddingów.\n",
+        "# W Azure to NAZWY DEPLOYMENTÓW utworzonych w AI Foundry.\n",
+        "MODELS = {\n",
+        "    \"openai\":   {\"chat\": \"gpt-5-nano\", \"classic\": \"gpt-4.1-mini\", \"embed\": \"text-embedding-3-small\"},\n",
+        "    \"azure\":    {\"chat\": \"gpt-4o-mini\", \"classic\": \"gpt-4o-mini\", \"embed\": \"text-embedding-3-small\"},\n",
+        "    \"deepseek\": {\"chat\": \"deepseek-reasoner\", \"classic\": \"deepseek-chat\", \"embed\": None},\n",
+        "    \"ollama\":   {\"chat\": os.getenv(\"OLLAMA_CHAT\", \"gemma4:e4b\"), \"classic\": \"gemma3:1b\", \"embed\": \"embeddinggemma\"},\n",
+        "    \"proxy\":    {\"chat\": \"copilot/gpt-5-mini\", \"classic\": \"copilot/gpt-5-mini\", \"embed\": None},\n",
+        "}\n",
+        "\n",
+        "def make_client(provider):\n",
+        "    if provider == \"azure\":\n",
+        "        return AzureOpenAI(api_version=\"2024-12-01-preview\")  # AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY\n",
+        "    if provider == \"deepseek\":\n",
+        "        return OpenAI(base_url=\"https://api.deepseek.com\", api_key=os.environ[\"DEEPSEEK_API_KEY\"])\n",
+        "    if provider == \"ollama\":\n",
+        "        return OpenAI(base_url=\"http://localhost:11434/v1\", api_key=\"ollama\")  # klucz wymagany, ale ignorowany\n",
+        "    if provider == \"proxy\":\n",
+        "        return OpenAI(base_url=\"http://localhost:8787/v1\", api_key=\"teg\")\n",
+        "    return OpenAI()  # OPENAI_API_KEY\n",
+        "\n",
+        "PROVIDER = os.getenv(\"LLM_PROVIDER\", \"ollama\")\n",
+        "EMBED_PROVIDER = os.getenv(\"EMBED_PROVIDER\") or (PROVIDER if MODELS[PROVIDER][\"embed\"] else \"ollama\")\n",
+        "\n",
+        "client = make_client(PROVIDER)\n",
+        "embed_client = client if EMBED_PROVIDER == PROVIDER else make_client(EMBED_PROVIDER)\n",
+        "CHAT, CLASSIC = MODELS[PROVIDER][\"chat\"], MODELS[PROVIDER][\"classic\"]\n",
+        "EMBED = MODELS[EMBED_PROVIDER][\"embed\"]\n",
+        "print(f\"czat: {PROVIDER} ({CHAT}, klasyczny: {CLASSIC}) | embeddingi: {EMBED_PROVIDER} ({EMBED})\")"
+      ],
+      "id": "c04"
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c05"
+      },
+      "source": [
+        "## Część 1. Wywołanie modelu\n",
+        "\n",
+        "1. Wywołanie `CHAT` z własnym system promptem, który wymusza format odpowiedzi (np. JSON z ustalonymi polami).\n",
+        "2. Wypisanie treści odpowiedzi, `finish_reason` i `usage`.\n",
+        "3. Sprawdzenie w kodzie, czy odpowiedź ma oczekiwany format (np. `json.loads`), i wypisanie wyniku sprawdzenia."
+      ],
+      "id": "c05"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "c06",
+        "outputId": "f80ac403-9283-4b9c-bcbe-ac3f33a11ceb",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "execution_count": 4,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Treść odpowiedzi:\n",
+            "{\"nazwa\": \"Prosty Omlet\", \"czas_minuty\": 5, \"skladniki\": [\"2 jajka\", \"1 łyżka masła\", \"Sól\", \"Pieprz (opcjonalnie)\"]}\n",
+            "\n",
+            "Finish reason:\n",
+            "stop\n",
+            "\n",
+            "Usage:\n",
+            "CompletionUsage(completion_tokens=51, prompt_tokens=105, total_tokens=156, completion_tokens_details=None, prompt_tokens_details=PromptTokensDetails(audio_tokens=None, cache_write_tokens=None, cached_tokens=0))\n",
+            "\n",
+            "Czy format odpowiedzi jest poprawny? True\n"
+          ]
+        }
+      ],
+      "source": [
+        "\n",
+        "import json\n",
+        "\n",
+        "system_prompt = \"\"\"\n",
+        "Jesteś asystentem kulinarnym.\n",
+        "Odpowiadaj wyłącznie poprawnym obiektem JSON\n",
+        "z dokładnie trzema polami:\n",
+        "\"nazwa\" (tekst),\n",
+        "\"czas_minuty\" (liczba całkowita),\n",
+        "\"skladniki\" (lista tekstów).\n",
+        "Nie dodawaj żadnego tekstu poza JSON.\n",
+        "\"\"\"\n",
+        "\n",
+        "response = client.chat.completions.create(\n",
+        "    model=CHAT,\n",
+        "    messages=[\n",
+        "        {\"role\": \"system\", \"content\": system_prompt},\n",
+        "        {\n",
+        "            \"role\": \"user\",\n",
+        "            \"content\": \"Podaj prosty przepis na omlet z trzech składników.\"\n",
+        "        }\n",
+        "    ],\n",
+        "    response_format={\"type\": \"json_object\"}\n",
+        ")\n",
+        "\n",
+        "content = response.choices[0].message.content\n",
+        "\n",
+        "print(\"Treść odpowiedzi:\")\n",
+        "print(content)\n",
+        "\n",
+        "print(\"\\nFinish reason:\")\n",
+        "print(response.choices[0].finish_reason)\n",
+        "\n",
+        "print(\"\\nUsage:\")\n",
+        "print(response.usage)\n",
+        "\n",
+        "try:\n",
+        "    data = json.loads(content)\n",
+        "    valid = (\n",
+        "        isinstance(data, dict)\n",
+        "        and set(data.keys()) == {\"nazwa\", \"czas_minuty\", \"skladniki\"}\n",
+        "        and isinstance(data[\"nazwa\"], str)\n",
+        "        and isinstance(data[\"czas_minuty\"], int)\n",
+        "        and isinstance(data[\"skladniki\"], list)\n",
+        "        and all(isinstance(x, str) for x in data[\"skladniki\"])\n",
+        "    )\n",
+        "    print(\"\\nCzy format odpowiedzi jest poprawny?\", valid)\n",
+        "except (json.JSONDecodeError, TypeError):\n",
+        "    print(\"\\nCzy format odpowiedzi jest poprawny? False\")\n"
+      ],
+      "id": "c06"
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c07"
+      },
+      "source": [
+        "## Część 2. Koszt w tokenach\n",
+        "\n",
+        "1. Akapit tekstu po polsku (min. 300 znaków) i jego tłumaczenie na angielski.\n",
+        "2. Liczba tokenów obu wersji według tokenizera `o200k_base` (`tiktoken`).\n",
+        "3. Wysłanie obu wersji do modelu z tym samym poleceniem i porównanie `usage.prompt_tokens`.\n",
+        "4. W komórce markdown: o ile procent droższa jest wersja polska i z czego to wynika."
+      ],
+      "id": "c07"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "c08",
+        "outputId": "b3c3de47-13e6-4514-ee9f-96ea07b7d446",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "execution_count": 5,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "TOKENIZACJA o200k_base\n",
+            "Liczba znaków PL: 571\n",
+            "Liczba znaków EN: 526\n",
+            "Tokeny polskie: 167\n",
+            "Tokeny angielskie: 105\n",
+            "\n",
+            "ZUŻYCIE ZGŁOSZONE PRZEZ MODEL\n",
+            "Polski prompt_tokens: 192\n",
+            "Angielski prompt_tokens: 139\n",
+            "Różnica PL względem EN: 38.13%\n",
+            "Wersja polska użyła o 38.13% więcej tokenów.\n",
+            "\n",
+            "Odpowiedź modelu — PL:\n",
+            "Przygotowanie listy zakupów, uwzględniając terminy przydatności i używanie resztek, pozwala ograniczyć marnowanie żywności, oszczędzać pieniądze i zmniejszyć ilość odpadów.\n",
+            "\n",
+            "\n",
+            "Odpowiedź modelu — EN:\n",
+            "Zmniejszanie marnowania żywności jest ważne dla ochrony środowiska i zarządzania budżetem, ponieważ nieprzygotowane zakupy, przekazywanie dat ważności i brak planowania prowadzą do marnowania żywności i generowania odpadów. \n",
+            "\n",
+            "\n"
+          ]
+        }
+      ],
+      "source": [
+        "\n",
+        "import tiktoken\n",
+        "\n",
+        "# Tekst po polsku — ponad 300 znaków\n",
+        "tekst_pl = \"\"\"\n",
+        "Ograniczanie marnowania żywności jest ważnym elementem\n",
+        "dbania o środowisko i domowy budżet. Wiele produktów\n",
+        "trafia do kosza, ponieważ kupujemy ich zbyt dużo,\n",
+        "zapominamy o terminach przydatności lub nie planujemy\n",
+        "posiłków. Dobrym rozwiązaniem jest przygotowywanie\n",
+        "list zakupów, sprawdzanie zawartości lodówki oraz\n",
+        "wykorzystywanie resztek do nowych potraw. Aplikacje\n",
+        "do planowania przepisów mogą podpowiadać dania na\n",
+        "podstawie dostępnych składników. Dzięki temu łatwiej\n",
+        "zużyć produkty przed upływem ich terminu przydatności,\n",
+        "ograniczyć wydatki i zmniejszyć ilość odpadów.\n",
+        "\"\"\"\n",
+        "\n",
+        "tekst_en = \"\"\"\n",
+        "Reducing food waste is an important way to protect\n",
+        "the environment and manage a household budget.\n",
+        "Many products are thrown away because we buy too\n",
+        "much, forget expiration dates, or fail to plan meals.\n",
+        "A good solution is to prepare shopping lists, check\n",
+        "the contents of the refrigerator, and use leftovers\n",
+        "to create new dishes. Recipe planning applications\n",
+        "can suggest meals based on available ingredients.\n",
+        "This makes it easier to use products before they\n",
+        "expire, reduce expenses, and decrease the amount\n",
+        "of waste we produce.\n",
+        "\"\"\"\n",
+        "\n",
+        "# Liczenie tokenów za pomocą wskazanego tokenizera\n",
+        "encoding = tiktoken.get_encoding(\"o200k_base\")\n",
+        "\n",
+        "tokens_pl = len(encoding.encode(tekst_pl))\n",
+        "tokens_en = len(encoding.encode(tekst_en))\n",
+        "\n",
+        "print(\"TOKENIZACJA o200k_base\")\n",
+        "print(\"Liczba znaków PL:\", len(tekst_pl))\n",
+        "print(\"Liczba znaków EN:\", len(tekst_en))\n",
+        "print(\"Tokeny polskie:\", tokens_pl)\n",
+        "print(\"Tokeny angielskie:\", tokens_en)\n",
+        "\n",
+        "# Identyczne polecenie dla obu wersji\n",
+        "instruction = (\n",
+        "    \"Streść poniższy tekst w jednym zdaniu po polsku. \"\n",
+        "    \"Zwróć wyłącznie streszczenie.\\n\\n\"\n",
+        ")\n",
+        "\n",
+        "def ask_model(text):\n",
+        "    return client.chat.completions.create(\n",
+        "        model=CLASSIC,\n",
+        "        messages=[\n",
+        "            {\n",
+        "                \"role\": \"user\",\n",
+        "                \"content\": instruction + text\n",
+        "            }\n",
+        "        ]\n",
+        "    )\n",
+        "\n",
+        "response_pl = ask_model(tekst_pl)\n",
+        "response_en = ask_model(tekst_en)\n",
+        "\n",
+        "usage_pl = response_pl.usage\n",
+        "usage_en = response_en.usage\n",
+        "\n",
+        "print(\"\\nZUŻYCIE ZGŁOSZONE PRZEZ MODEL\")\n",
+        "print(\"Polski prompt_tokens:\", usage_pl.prompt_tokens if usage_pl else \"brak danych\")\n",
+        "print(\"Angielski prompt_tokens:\", usage_en.prompt_tokens if usage_en else \"brak danych\")\n",
+        "\n",
+        "if usage_pl and usage_en:\n",
+        "    pl_count = usage_pl.prompt_tokens\n",
+        "    en_count = usage_en.prompt_tokens\n",
+        "\n",
+        "    if en_count > 0:\n",
+        "        difference = (pl_count - en_count) / en_count * 100\n",
+        "        print(f\"Różnica PL względem EN: {difference:.2f}%\")\n",
+        "        if difference > 0:\n",
+        "            print(f\"Wersja polska użyła o {difference:.2f}% więcej tokenów.\")\n",
+        "        elif difference < 0:\n",
+        "            print(f\"Wersja polska użyła o {abs(difference):.2f}% mniej tokenów.\")\n",
+        "        else:\n",
+        "            print(\"Obie wersje zużyły tyle samo tokenów.\")\n",
+        "else:\n",
+        "    print(\"Model nie udostępnił danych usage dla obu zapytań.\")\n",
+        "\n",
+        "print(\"\\nOdpowiedź modelu — PL:\")\n",
+        "print(response_pl.choices[0].message.content)\n",
+        "\n",
+        "print(\"\\nOdpowiedź modelu — EN:\")\n",
+        "print(response_en.choices[0].message.content)\n"
+      ],
+      "id": "c08"
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c09"
+      },
+      "source": [
+        "*Odpowiedź:*\n",
+        "**Porównanie kosztu w tokenach**\n",
+        "\n",
+        "Tekst polski zawierał **167 tokenów**, a jego angielskie tłumaczenie **105 tokenów** według tokenizera `o200k_base`.\n",
+        "\n",
+        "Model Ollama zgłosił **192 tokenów wejściowych** dla wersji polskiej i **139** dla wersji angielskiej. Oznacza to, że wersja polska zużyła **38.13% więcej** tokenów wejściowych.\n",
+        "\n",
+        "Różnica wynika ze sposobu, w jaki tokenizer dzieli słowa na tokeny. Język polski zawiera liczne formy fleksyjne, końcówki i znaki diakrytyczne, co może wpływać na liczbę tokenów. Wynik zależy również od długości tłumaczenia oraz tokenizera konkretnego modelu."
+      ],
+      "id": "c09"
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c10"
+      },
+      "source": [
+        "## Część 3. Mini-wyszukiwarka\n",
+        "\n",
+        "1. Co najmniej **10 krótkich dokumentów** (1–2 zdania) z jednej, wybranej dziedziny.\n",
+        "2. Embeddingi dokumentów (`embed_client`, model `EMBED`) i funkcja `search(query, k=3)` oparta na cosinusie.\n",
+        "3. **3 pytania**: dwa z poprawną odpowiedzią wyszukiwarki i jedno z błędną.\n",
+        "4. W komórce markdown: przyczyna błędu (2–4 zdania)."
+      ],
+      "id": "c10"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import numpy as np\n",
+        "from sklearn.metrics.pairwise import cosine_similarity\n",
+        "\n",
+        "# 1. Baza dokumentów — jedna dziedzina: ograniczanie marnowania żywności\n",
+        "documents = [\n",
+        "    \"Warzywa, które niedługo stracą świeżość, można wykorzystać do przygotowania zupy krem.\",\n",
+        "    \"Czerstwe pieczywo nadaje się do przygotowania grzanek, tostów lub bułki tartej.\",\n",
+        "    \"Produkty mleczne należy przechowywać w lodówce zgodnie z zaleceniami producenta.\",\n",
+        "    \"Planowanie posiłków na cały tydzień pomaga ograniczyć niepotrzebne zakupy.\",\n",
+        "    \"Przed wyjściem do sklepu warto sprawdzić zawartość lodówki i szafek kuchennych.\",\n",
+        "    \"Ugotowany ryż należy szybko schłodzić i przechowywać w lodówce w zamkniętym pojemniku.\",\n",
+        "    \"Resztki pieczonych warzyw można dodać do sałatki albo omletu.\",\n",
+        "    \"Daty przydatności do spożycia pomagają ocenić, jak długo można bezpiecznie przechowywać produkt.\",\n",
+        "    \"Nadmiar świeżych ziół można posiekać i zamrozić na później.\",\n",
+        "    \"Mrożenie nadwyżek żywności pozwala zachować je na kolejne posiłki.\"\n",
+        "]\n",
+        "\n",
+        "# 2. Tworzenie embeddingów dokumentów\n",
+        "documents_response = embed_client.embeddings.create(\n",
+        "    model=EMBED,\n",
+        "    input=documents\n",
+        ")\n",
+        "\n",
+        "document_embeddings = np.array([\n",
+        "    item.embedding for item in documents_response.data\n",
+        "])\n",
+        "\n",
+        "print(\"Liczba dokumentów:\", len(documents))\n",
+        "print(\"Liczba utworzonych embeddingów:\", len(document_embeddings))\n",
+        "print(\"Model embeddingów:\", EMBED)\n",
+        "\n",
+        "\n",
+        "# 3. Funkcja wyszukiwania według podobieństwa cosinusowego\n",
+        "def search(query, k=3):\n",
+        "    query_response = embed_client.embeddings.create(\n",
+        "        model=EMBED,\n",
+        "        input=[query]\n",
+        "    )\n",
+        "\n",
+        "    query_embedding = np.array(\n",
+        "        query_response.data[0].embedding\n",
+        "    ).reshape(1, -1)\n",
+        "\n",
+        "    similarities = cosine_similarity(\n",
+        "        query_embedding,\n",
+        "        document_embeddings\n",
+        "    )[0]\n",
+        "\n",
+        "    best_indices = np.argsort(similarities)[::-1][:k]\n",
+        "\n",
+        "    results = []\n",
+        "    for index in best_indices:\n",
+        "        results.append({\n",
+        "            \"document\": documents[index],\n",
+        "            \"similarity\": float(similarities[index])\n",
+        "        })\n",
+        "\n",
+        "    return results\n",
+        "\n",
+        "\n",
+        "# 4. Trzy testowe zapytania\n",
+        "queries = [\n",
+        "    \"Co zrobić z warzywami, które niedługo się zepsują?\",\n",
+        "    \"Jak przechowywać pieczywo, żeby dłużej było świeże?\",\n",
+        "    \"Jak naprawić pęknięty ekran telefonu?\"\n",
+        "]\n",
+        "\n",
+        "for number, query in enumerate(queries, start=1):\n",
+        "    print(\"\\n\" + \"=\" * 70)\n",
+        "    print(f\"TEST {number}: {query}\")\n",
+        "    print(\"-\" * 70)\n",
+        "\n",
+        "    results = search(query, k=3)\n",
+        "\n",
+        "    for rank, result in enumerate(results, start=1):\n",
+        "        print(f\"{rank}. Podobieństwo: {result['similarity']:.4f}\")\n",
+        "        print(\"   Dokument:\", result[\"document\"])\n",
+        "\n"
+      ],
+      "metadata": {
+        "id": "aAEJAkBa7Aop",
+        "outputId": "b17aafb3-85de-4344-ab46-cc5db17e7347",
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        }
+      },
+      "id": "aAEJAkBa7Aop",
+      "execution_count": 9,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Liczba dokumentów: 10\n",
+            "Liczba utworzonych embeddingów: 10\n",
+            "Model embeddingów: embeddinggemma\n",
+            "\n",
+            "======================================================================\n",
+            "TEST 1: Co zrobić z warzywami, które niedługo się zepsują?\n",
+            "----------------------------------------------------------------------\n",
+            "1. Podobieństwo: 0.7779\n",
+            "   Dokument: Warzywa, które niedługo stracą świeżość, można wykorzystać do przygotowania zupy krem.\n",
+            "2. Podobieństwo: 0.6875\n",
+            "   Dokument: Resztki pieczonych warzyw można dodać do sałatki albo omletu.\n",
+            "3. Podobieństwo: 0.6474\n",
+            "   Dokument: Nadmiar świeżych ziół można posiekać i zamrozić na później.\n",
+            "\n",
+            "======================================================================\n",
+            "TEST 2: Jak przechowywać pieczywo, żeby dłużej było świeże?\n",
+            "----------------------------------------------------------------------\n",
+            "1. Podobieństwo: 0.6476\n",
+            "   Dokument: Ugotowany ryż należy szybko schłodzić i przechowywać w lodówce w zamkniętym pojemniku.\n",
+            "2. Podobieństwo: 0.6263\n",
+            "   Dokument: Produkty mleczne należy przechowywać w lodówce zgodnie z zaleceniami producenta.\n",
+            "3. Podobieństwo: 0.6160\n",
+            "   Dokument: Daty przydatności do spożycia pomagają ocenić, jak długo można bezpiecznie przechowywać produkt.\n",
+            "\n",
+            "======================================================================\n",
+            "TEST 3: Jak naprawić pęknięty ekran telefonu?\n",
+            "----------------------------------------------------------------------\n",
+            "1. Podobieństwo: 0.3182\n",
+            "   Dokument: Przed wyjściem do sklepu warto sprawdzić zawartość lodówki i szafek kuchennych.\n",
+            "2. Podobieństwo: 0.3013\n",
+            "   Dokument: Warzywa, które niedługo stracą świeżość, można wykorzystać do przygotowania zupy krem.\n",
+            "3. Podobieństwo: 0.2928\n",
+            "   Dokument: Planowanie posiłków na cały tydzień pomaga ograniczyć niepotrzebne zakupy.\n"
+          ]
+        }
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "c12"
+      },
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "# TODO: 3 pytania i wyniki"
+      ],
+      "id": "c12"
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "c13"
+      },
+      "source": [
+        "*Wyjaśnienie błędu:* Analiza działania mini-wyszukiwarki\n",
+        "\n",
+        "W projekcie przygotowano bazę 10 krótkich dokumentów dotyczących ograniczania marnowania żywności. Dla każdego dokumentu utworzono embedding za pomocą modelu wskazanego w zmiennej `EMBED`. Wyszukiwanie polega na obliczaniu podobieństwa cosinusowego między embeddingiem zapytania a embeddingami dokumentów. Funkcja `search(query, k=3)` zwraca trzy dokumenty o najwyższym podobieństwie.\n",
+        "\n",
+        "Dwa pierwsze zapytania dotyczą wykorzystania warzyw oraz przechowywania pieczywa. Wyszukiwarka powinna znaleźć dokumenty związane z tymi tematami. Trzecie zapytanie dotyczy naprawy ekranu telefonu, czyli zagadnienia nieobecnego w bazie dokumentów.\n",
+        "\n",
+        "Niepowodzenie trzeciego zapytania wynika z ograniczonej zawartości bazy. Wyszukiwarka zwraca najbardziej podobne dokumenty nawet wtedy, gdy żaden z nich nie odpowiada na pytanie. Wysokie podobieństwo nie oznacza więc automatycznie, że dokument zawiera prawidłową odpowiedź. Aby ograniczyć takie sytuacje, można zastosować próg podobieństwa i zwracać komunikat o braku odpowiednich informacji.\n"
+      ],
+      "id": "c13"
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "display_name": "Python 3",
+      "name": "python3"
+    },
+    "language_info": {
+      "name": "python"
+    },
+    "colab": {
+      "provenance": [],
+      "gpuType": "T4"
+    },
+    "accelerator": "GPU"
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
